@@ -188,6 +188,24 @@ jobs:
           cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
           [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
           echo "macOS updater artifact copied: $NEW_TAR_GZ"
+          # DMG 安装包
+          DMG_PATH=""
+          for path in \
+            "src-tauri/target/universal-apple-darwin/release/bundle/dmg" \
+            "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg" \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg" \
+            "src-tauri/target/release/bundle/dmg"; do
+            if [ -d "$path" ]; then
+              [ -z "$DMG_PATH" ] && DMG_PATH=$(find "$path" -maxdepth 1 -name "*.dmg" -type f | head -1 || true)
+            fi
+          done
+          if [ -n "$DMG_PATH" ]; then
+            NEW_DMG="BMAI-Tools-${VERSION}-macOS.dmg"
+            cp "$DMG_PATH" "release-assets/$NEW_DMG"
+            echo "macOS DMG copied: $NEW_DMG"
+          else
+            echo "No .dmg found (optional)"
+          fi
           if [ -n "$APP_PATH" ]; then
             APP_DIR=$(dirname "$APP_PATH"); APP_NAME=$(basename "$APP_PATH")
             NEW_ZIP="BMAI-Tools-${VERSION}-macOS.zip"
@@ -225,6 +243,20 @@ jobs:
             }
           } else {
             Write-Warning 'No Windows MSI installer found'
+          }
+          # NSIS exe 安装包
+          $nsis = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Recurse -Include *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $nsis) {
+            $destExe = "BMAI-Tools-$VERSION-Windows-Setup.exe"
+            Copy-Item $nsis.FullName (Join-Path release-assets $destExe)
+            Write-Host "NSIS installer copied: $destExe"
+            $sigPathExe = "$($nsis.FullName).sig"
+            if (Test-Path $sigPathExe) {
+              Copy-Item $sigPathExe (Join-Path release-assets ("$destExe.sig"))
+              Write-Host "Signature copied: $destExe.sig"
+            }
+          } else {
+            Write-Warning 'No Windows NSIS installer found'
           }
           # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
           $exeCandidates = @(
@@ -302,8 +334,8 @@ jobs:
 
             ### 下载
 
-            - **macOS**: `BMAI-Tools-${{ github.ref_name }}-macOS.zip`（解压即用）或 `BMAI-Tools-${{ github.ref_name }}-macOS.tar.gz`（Homebrew）
-            - **Windows**: `BMAI-Tools-${{ github.ref_name }}-Windows.msi`（安装版）或 `BMAI-Tools-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
+            - **macOS**: `BMAI-Tools-${{ github.ref_name }}-macOS.dmg`（dmg安装版）或 `BMAI-Tools-${{ github.ref_name }}-macOS.zip`（解压即用）
+            - **Windows**: `BMAI-Tools-${{ github.ref_name }}-Windows-Setup.exe`（exe安装版）或 `BMAI-Tools-${{ github.ref_name }}-Windows.msi`（msi安装版）或 `BMAI-Tools-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
             - **Linux**: `BMAI-Tools-${{ github.ref_name }}-Linux.AppImage`（AppImage）或 `BMAI-Tools-${{ github.ref_name }}-Linux.deb`（Debian/Ubuntu）
 
             ---

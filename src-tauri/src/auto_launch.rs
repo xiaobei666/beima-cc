@@ -3,7 +3,7 @@ use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 
 /// 初始化 AutoLaunch 实例
 fn get_auto_launch() -> Result<AutoLaunch, AppError> {
-    let app_name = "CC Switch";
+    let app_name = "BMAI Tools";
     let app_path =
         std::env::current_exe().map_err(|e| AppError::Message(format!("无法获取应用路径: {e}")))?;
 

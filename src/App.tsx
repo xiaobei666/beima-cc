@@ -90,11 +90,18 @@ function App() {
   const skillsPageRef = useRef<any>(null);
   const usageLogPanelRef = useRef<UsageLogPanelRef>(null);
   const [usageLogPeriod, setUsageLogPeriod] = useState<"daily" | "monthly">("daily");
+  const [usageLogIsLoading, setUsageLogIsLoading] = useState(false);
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp);
   const providers = useMemo(() => data?.providers ?? {}, [data]);
   const currentProviderId = data?.currentProviderId ?? "";
   const isClaudeApp = activeApp === "claude";
+
+  useEffect(() => {
+    if (currentView !== "usageLog") {
+      setUsageLogIsLoading(false);
+    }
+  }, [currentView]);
 
   const {
     addProvider,
@@ -345,6 +352,7 @@ function App() {
             appId={activeApp}
             currentProvider={providers[currentProviderId] ?? null}
             onOpenChange={() => setCurrentView("providers")}
+            onLoadingChange={setUsageLogIsLoading}
           />
         );
       default:
@@ -595,10 +603,10 @@ function App() {
                       size="sm"
                       onClick={() => usageLogPanelRef.current?.refresh()}
                       disabled={
-                        !usageLogApiKey || usageLogPanelRef.current?.isLoading
+                        !usageLogApiKey || usageLogIsLoading
                       }
                     >
-                      {usageLogPanelRef.current?.isLoading ? (
+                      {usageLogIsLoading ? (
                         <Loader2 size={14} className="animate-spin" />
                       ) : (
                         <RefreshCw size={14} />

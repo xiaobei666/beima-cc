@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, forwardRef, useImperativeHandle } from "react";
+import { useState, useEffect, useMemo, forwardRef, useImperativeHandle, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   RefreshCw,
@@ -22,6 +22,7 @@ export interface UsageLogPanelProps {
   appId: AppId;
   currentProvider: Provider | null;
   onOpenChange?: (open: boolean) => void;
+  onLoadingChange?: (isLoading: boolean) => void;
 }
 
 export interface UsageLogPanelRef {
@@ -97,7 +98,7 @@ function getModelColorStyle(model: string): { bg: string; text: string } {
 }
 
 export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
-  ({ appId, currentProvider }, ref) => {
+  ({ appId, currentProvider, onLoadingChange }, ref) => {
     const { t } = useTranslation();
 
     const apiKey = useMemo(
@@ -109,52 +110,110 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
       [currentProvider]
     );
 
-    const [isLoading, setIsLoading] = useState(false);
+    const [isUserLoading, setIsUserLoading] = useState(false);
+    const [isModelLoading, setIsModelLoading] = useState(false);
     const [result, setResult] = useState<UsageLogResult | null>(null);
     const [modelStats, setModelStats] = useState<ModelStatsResult | null>(null);
     const [period, setPeriod] = useState<"daily" | "monthly">("daily");
 
-    const handleQuery = async () => {
+    const requestSeq = useRef(0);
+    const activeRequestId = useRef(0);
+
+    const queryUsage = async (queryPeriod: "daily" | "monthly") => {
       if (!apiKey.trim()) return;
 
-      setIsLoading(true);
+      const requestId = (requestSeq.current += 1);
+      activeRequestId.current = requestId;
+
+      const debug = (label: string, details?: Record<string, unknown>) => {
+        if (!import.meta.env.DEV) return;
+        // eslint-disable-next-line no-console
+        console.debug(`[usageLog] ${label}`, details || {});
+      };
+
+      const now = () =>
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+
+      setIsUserLoading(true);
+      setIsModelLoading(true);
+
+      const t0 = now();
+      debug("query:start", {
+        requestId,
+        period: queryPeriod,
+        appId,
+        hasApiKey: Boolean(apiKey.trim()),
+        baseUrl,
+      });
+
+      const userPromise = usageLogApi.query(apiKey, baseUrl, queryPeriod);
+      const modelPromise = usageLogApi.queryModelStats(apiKey, baseUrl, queryPeriod);
+
+      let userResult: UsageLogResult | null = null;
+
+      const tUserStart = now();
       try {
-        const [userResult, modelResult] = await Promise.all([
-          usageLogApi.query(apiKey, baseUrl, period),
-          usageLogApi.queryModelStats(apiKey, baseUrl, period),
-        ]);
+        userResult = await userPromise;
+        if (activeRequestId.current !== requestId) {
+          void modelPromise.catch(() => undefined);
+          return;
+        }
         setResult(userResult);
+      } catch (error) {
+        if (activeRequestId.current !== requestId) {
+          void modelPromise.catch(() => undefined);
+          return;
+        }
+        setResult({ success: false, error: String(error) });
+        userResult = { success: false, error: String(error) };
+      } finally {
+        if (activeRequestId.current === requestId) {
+          setIsUserLoading(false);
+          debug("query:user_done", { requestId, ms: Math.round(now() - tUserStart) });
+        }
+      }
+
+      if (!userResult?.success) {
+        void modelPromise.catch(() => undefined);
+        if (activeRequestId.current === requestId) {
+          setModelStats(null);
+          setIsModelLoading(false);
+          debug("query:end_error", { requestId, ms: Math.round(now() - t0) });
+        }
+        return;
+      }
+
+      const tModelStart = now();
+      try {
+        const modelResult = await modelPromise;
+        if (activeRequestId.current !== requestId) return;
         setModelStats(modelResult);
       } catch (error) {
-        setResult({
-          success: false,
-          error: String(error),
-        });
-        setModelStats(null);
+        if (activeRequestId.current !== requestId) return;
+        setModelStats({ success: false, error: String(error) });
       } finally {
-        setIsLoading(false);
+        if (activeRequestId.current === requestId) {
+          setIsModelLoading(false);
+          debug("query:model_done", { requestId, ms: Math.round(now() - tModelStart) });
+          debug("query:end", { requestId, ms: Math.round(now() - t0) });
+        }
       }
     };
+
+    const handleQuery = async () => queryUsage(period);
 
     const handlePeriodChange = (newPeriod: "daily" | "monthly") => {
       setPeriod(newPeriod);
       if (apiKey) {
-        setIsLoading(true);
-        Promise.all([
-          usageLogApi.query(apiKey, baseUrl, newPeriod),
-          usageLogApi.queryModelStats(apiKey, baseUrl, newPeriod),
-        ])
-          .then(([userResult, modelResult]) => {
-            setResult(userResult);
-            setModelStats(modelResult);
-          })
-          .catch((error) => {
-            setResult({ success: false, error: String(error) });
-            setModelStats(null);
-          })
-          .finally(() => setIsLoading(false));
+        void queryUsage(newPeriod);
       }
     };
+
+    const isLoading = isUserLoading || isModelLoading;
+
+    useEffect(() => {
+      onLoadingChange?.(isLoading);
+    }, [isLoading, onLoadingChange]);
 
     // 暴露给父组件的方法和状态
     useImperativeHandle(ref, () => ({
@@ -168,7 +227,7 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
 
     useEffect(() => {
       if (apiKey) {
-        handleQuery();
+        void queryUsage(period);
       } else {
         setResult(null);
         setModelStats(null);
@@ -199,40 +258,56 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
     };
 
     const data = result?.data;
-    const allModels = modelStats?.data ?? [];
+    const allModels = useMemo(() => modelStats?.data ?? [], [modelStats?.data]);
 
     // 所有模型费用汇总（不做筛选，用于月统计）
-    const allModelsCost = allModels.reduce((sum, m) => sum + m.costs.total, 0);
+    const allModelsCost = useMemo(
+      () => allModels.reduce((sum, m) => sum + m.costs.total, 0),
+      [allModels]
+    );
 
     // 按 appId 过滤模型
-    const models = allModels.filter((m) => {
-      const model = m.model.toLowerCase();
-      if (appId === "claude") return model.includes("claude") || model.includes("anthropic") || model.includes("sonnet") || model.includes("opus") || model.includes("haiku");
-      if (appId === "codex") return model.includes("gpt") || model.includes("o1") || model.includes("o3") || model.includes("o4");
-      if (appId === "gemini") return model.includes("gemini");
-      return true;
-    });
+    const models = useMemo(
+      () =>
+        allModels.filter((m) => {
+          const model = m.model.toLowerCase();
+          if (appId === "claude") {
+            return (
+              model.includes("claude") ||
+              model.includes("anthropic") ||
+              model.includes("sonnet") ||
+              model.includes("opus") ||
+              model.includes("haiku")
+            );
+          }
+          if (appId === "codex") return model.includes("gpt") || model.includes("o1") || model.includes("o3") || model.includes("o4");
+          if (appId === "gemini") return model.includes("gemini");
+          return true;
+        }),
+      [allModels, appId]
+    );
 
     // 从模型统计计算周期汇总数据
-    const periodUsage = models.length > 0
-      ? models.reduce(
-          (acc, m) => ({
-            requests: acc.requests + m.requests,
-            inputTokens: acc.inputTokens + m.inputTokens,
-            outputTokens: acc.outputTokens + m.outputTokens,
-            cacheCreateTokens: acc.cacheCreateTokens + m.cacheCreateTokens,
-            cacheReadTokens: acc.cacheReadTokens + m.cacheReadTokens,
-            allTokens: acc.allTokens + m.allTokens,
-            cost: acc.cost + m.costs.total,
-          }),
-          { requests: 0, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, allTokens: 0, cost: 0 }
-        )
-      : null;
+    const periodUsage = useMemo(() => {
+      if (models.length === 0) return null;
+      return models.reduce(
+        (acc, m) => ({
+          requests: acc.requests + m.requests,
+          inputTokens: acc.inputTokens + m.inputTokens,
+          outputTokens: acc.outputTokens + m.outputTokens,
+          cacheCreateTokens: acc.cacheCreateTokens + m.cacheCreateTokens,
+          cacheReadTokens: acc.cacheReadTokens + m.cacheReadTokens,
+          allTokens: acc.allTokens + m.allTokens,
+          cost: acc.cost + m.costs.total,
+        }),
+        { requests: 0, inputTokens: 0, outputTokens: 0, cacheCreateTokens: 0, cacheReadTokens: 0, allTokens: 0, cost: 0 }
+      );
+    }, [models]);
 
     return (
       <div className="flex flex-col h-full overflow-auto">
         {/* 加载状态 */}
-        {isLoading && (
+        {isUserLoading && !result && (
           <div className="flex-1 flex items-center justify-center min-h-[300px]">
             <div className="flex flex-col items-center gap-3">
               <Loader2 className="h-10 w-10 animate-spin text-blue-500" />
@@ -244,7 +319,7 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
         )}
 
         {/* 错误状态 */}
-        {!isLoading && result && !result.success && (
+        {!isUserLoading && result && !result.success && (
           <div className="flex-1 flex items-center justify-center min-h-[300px]">
             <div className="flex flex-col items-center gap-4 text-center px-6">
               <div className="p-4 rounded-full bg-red-500/10">
@@ -268,7 +343,7 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
         )}
 
         {/* 未配置状态 */}
-        {!isLoading && !result && !apiKey && (
+        {!isUserLoading && !result && !apiKey && (
           <div className="flex-1 flex items-center justify-center min-h-[300px]">
             <div className="flex flex-col items-center gap-4 text-center px-6">
               <div className="p-4 rounded-full bg-yellow-500/10">
@@ -292,7 +367,7 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
         )}
 
         {/* 数据展示 */}
-        {!isLoading && result?.success && data && (
+        {!isUserLoading && result?.success && data && (
           <div className="space-y-4">
             {/* 限制信息卡片 */}
             {data.limits && (
@@ -330,15 +405,19 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
                     // 月统计：显示当月费用（所有模型费用汇总）
                     <div>
                       <div className="flex justify-between text-sm mb-1.5">
-                        <span className="text-muted-foreground">
-                          {t("usageLog.limits.monthlyCost", { defaultValue: "当月费用" })}
-                        </span>
-                        <span className="font-medium">
-                          ${allModelsCost.toFixed(4)}
-                        </span>
-                      </div>
-                    </div>
-                  )}
+	                        <span className="text-muted-foreground">
+	                          {t("usageLog.limits.monthlyCost", { defaultValue: "当月费用" })}
+	                        </span>
+	                        <span className="font-medium flex items-center gap-2">
+	                          {isModelLoading ? (
+	                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+	                          ) : (
+	                            `$${allModelsCost.toFixed(4)}`
+	                          )}
+	                        </span>
+	                      </div>
+	                    </div>
+	                  )}
                   {data.limits.totalCostLimit !== undefined && (
                     <div>
                       <div className="flex justify-between text-sm mb-1.5">
@@ -448,7 +527,22 @@ export const UsageLogPanel = forwardRef<UsageLogPanelRef, UsageLogPanelProps>(
             )}
 
             {/* 模型统计卡片 */}
-            {models.length > 0 && (
+            {isModelLoading && (
+              <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-violet-500/10 text-violet-500">
+                    <Cpu size={18} />
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>
+                      {t("usageLog.loading", { defaultValue: "正在查询用量数据..." })}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+            {!isModelLoading && models.length > 0 && (
               <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
                 <div className="flex items-center gap-3 mb-4">
                   <div className="p-2 rounded-lg bg-violet-500/10 text-violet-500">

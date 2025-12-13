@@ -130,7 +130,7 @@ describe("ProviderList Component", () => {
     );
 
     const placeholders = container.querySelectorAll(
-      ".border-dashed.border-muted-foreground\\/40",
+      ".animate-pulse",
     );
     expect(placeholders).toHaveLength(3);
   });
